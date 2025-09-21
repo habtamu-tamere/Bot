@@ -10,7 +10,7 @@ from handlers.makecv_conv import *
 load_dotenv()
 BOT_TOKEN = os.getenv('BOT_TOKEN')
 ADMIN_CHANNEL_ID = os.getenv('ADMIN_CHANNEL_ID')
-WEB_URL = os.getenv('WEB_URL', 'https://your-web-page-url.here')
+WEB_URL = os.getenv('WEB_URL', 'https://bot-anxw.onrender.com')
 RENDER_EXTERNAL_URL = os.getenv('RENDER_EXTERNAL_URL', '')  # Render provides this
 PORT = int(os.getenv('PORT', 10000))  # Render provides PORT
 
