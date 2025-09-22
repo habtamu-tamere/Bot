@@ -32,8 +32,8 @@ SELECTING_TIER, SELECTING_ADDONS, ENTERING_CONTACT, ENTERING_BUSINESS, SPECIAL_R
 
 class Config:
     BOT_TOKEN = os.getenv('BOT_TOKEN', 'YOUR_BOT_TOKEN_HERE')
-    ADMIN_CHANNEL = os.getenv('ADMIN_CHANNEL', '@your_admin_channel')  # Your channel username
-    SUPPORT_CHAT = os.getenv('SUPPORT_CHAT', '@your_support_chat')  # Support group/chat
+    ADMIN_CHANNEL = os.getenv('ADMIN_CHANNEL', '@habtinfo')  # Your channel username
+    SUPPORT_CHAT = os.getenv('SUPPORT_CHAT', '@habtinfo')  # Support group/chat
     
     SERVICE_TIERS = {
         'basic': {
