@@ -23,11 +23,11 @@ logger = logging.getLogger(__name__)
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user = update.effective_user
     welcome_text = f"""
-👋 *Welcome to Social Media Management Service!* 🇪🇹
+👋 *Welcome to Social Media Management Service!* 
 
 Hello {user.first_name}! I'm here to help you boost your business with professional social media management.
 
-💰 *All prices in Ethiopian Birr (ETB)*
+💰 *Simple pricing (ETB)*
 📱 *Direct ordering through this bot*
 ⚡ *Fast setup within 24 hours*
 
@@ -43,7 +43,7 @@ Choose an option below to get started:
 # Show pricing tiers
 async def show_pricing(update: Update, context: ContextTypes.DEFAULT_TYPE):
     tiers_text = """
-📊 *Our Service Packages* 🇪🇹
+📊 *Our Service Packages* 
 
 Choose the package that best fits your business needs:
     """
