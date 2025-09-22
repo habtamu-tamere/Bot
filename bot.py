@@ -1,342 +1,538 @@
+import os
 import logging
-from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
-from telegram.ext import Application, CommandHandler, CallbackQueryHandler, MessageHandler, filters, ContextTypes
-from config import BOT_TOKEN, ADMIN_CHAT_ID
-from messages import *
-from keyboards import *
-from database import init_db, save_order, get_orders
+from telegram import (
+    Update, 
+    InlineKeyboardButton, 
+    InlineKeyboardMarkup,
+    ReplyKeyboardMarkup,
+    KeyboardButton
+)
+from telegram.ext import (
+    Application, 
+    CommandHandler, 
+    CallbackQueryHandler, 
+    MessageHandler, 
+    filters, 
+    ContextTypes,
+    ConversationHandler
+)
+import sqlite3
 
-# Set up logging
+from config import Config
+from database import Database
+
+# Enable logging
 logging.basicConfig(
     format='%(asctime)s - %(name)s - %(levelname)s - %(message)s',
     level=logging.INFO
 )
 
-# Initialize database
-init_db()
+logger = logging.getLogger(__name__)
 
-# Service tiers in Ethiopian Birr
-SERVICE_TIERS = {
-    'basic': {
-        'name': '📱 Basic Package',
-        'price': 2500,
-        'features': [
-            '✅ 2 Social Media Platforms',
-            '✅ 5 Posts per week',
-            '✅ Basic Analytics',
-            '✅ Content Creation',
-            '✅ 24/7 Support'
+# Conversation states
+SELECTING_TIER, SELECTING_ADDONS, ENTERING_CONTACT, ENTERING_BUSINESS, SPECIAL_REQUESTS, CONFIRM_ORDER = range(6)
+
+# Database instance
+db = Database()
+
+class SocialMediaBot:
+    def __init__(self, token):
+        self.application = Application.builder().token(token).build()
+        self.setup_handlers()
+    
+    def setup_handlers(self):
+        # Command handlers
+        self.application.add_handler(CommandHandler("start", self.start_command))
+        self.application.add_handler(CommandHandler("help", self.help_command))
+        self.application.add_handler(CommandHandler("order", self.start_order))
+        
+        # Conversation handler for ordering process
+        conv_handler = ConversationHandler(
+            entry_points=[CommandHandler('order', self.start_order)],
+            states={
+                SELECTING_TIER: [CallbackQueryHandler(self.select_tier, pattern='^tier_')],
+                SELECTING_ADDONS: [CallbackQueryHandler(self.select_addons, pattern='^addon_|^proceed_')],
+                ENTERING_CONTACT: [MessageHandler(filters.TEXT & ~filters.COMMAND, self.enter_contact)],
+                ENTERING_BUSINESS: [MessageHandler(filters.TEXT & ~filters.COMMAND, self.enter_business)],
+                SPECIAL_REQUESTS: [MessageHandler(filters.TEXT & ~filters.COMMAND, self.special_requests)],
+                CONFIRM_ORDER: [CallbackQueryHandler(self.confirm_order, pattern='^confirm_|^cancel_')]
+            },
+            fallbacks=[CommandHandler('cancel', self.cancel_order)]
+        )
+        
+        self.application.add_handler(conv_handler)
+        self.application.add_handler(CallbackQueryHandler(self.button_click))
+    
+    async def start_command(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
+        """Send welcome message when command /start is issued."""
+        user = update.message.from_user
+        welcome_text = f"""
+👋 *Welcome to Social Media Pro ET*, {user.first_name}!
+
+📱 *Professional Social Media Management Services*
+*📍 Serving Ethiopian Businesses*
+*💰 Prices in Ethiopian Birr*
+
+*Quick Commands:*
+/order - 🛒 Start new order
+/services - 📊 View service packages
+/help - ❓ Get assistance
+
+*Why Choose Us?*
+✅ Ethiopian Market Expertise
+✅ Affordable Pricing in ETB
+✅ Professional Content Creation
+✅ 24/7 Customer Support
+
+*Start your order with* /order
+        """
+        
+        keyboard = [
+            [InlineKeyboardButton("🛒 Start Order", callback_data="start_order")],
+            [InlineKeyboardButton("📊 View Services", callback_data="view_services")],
+            [InlineKeyboardButton("📞 Contact Support", callback_data="contact_support")]
         ]
-    },
-    'professional': {
-        'name': '💼 Professional Package',
-        'price': 5000,
-        'features': [
-            '✅ 4 Social Media Platforms',
-            '✅ 10 Posts per week',
-            '✅ Advanced Analytics',
-            '✅ Content Strategy',
-            '✅ Ad Management',
-            '✅ Monthly Reports',
-            '✅ Priority Support'
+        reply_markup = InlineKeyboardMarkup(keyboard)
+        
+        await update.message.reply_text(
+            welcome_text, 
+            parse_mode='Markdown',
+            reply_markup=reply_markup
+        )
+    
+    async def help_command(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
+        """Send help information."""
+        help_text = """
+*🤖 How to Use This Bot:*
+
+*1. Start Order*
+Use /order or click "Start Order" to begin
+
+*2. Choose Service Tier*
+Select from Basic, Professional, or Enterprise packages
+
+*3. Select Add-ons*
+Customize with additional services
+
+*4. Provide Details*
+Share your contact and business information
+
+*5. Confirm Order*
+Review and confirm your order
+
+*Need Help?*
+Contact our support team directly through this bot or visit our channel: {channel}
+        """.format(channel=Config.TELEGRAM_CHANNEL)
+        
+        await update.message.reply_text(help_text, parse_mode='Markdown')
+    
+    async def start_order(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
+        """Start the order process."""
+        query = update.callback_query
+        if query:
+            await query.answer()
+            message = query.message
+        else:
+            message = update.message
+        
+        # Clear any existing user data
+        context.user_data.clear()
+        
+        # Show service tiers
+        keyboard = []
+        for tier_key, tier in Config.SERVICE_TIERS.items():
+            keyboard.append([
+                InlineKeyboardButton(
+                    f"{tier['name']} - {tier['price']} ETB/month", 
+                    callback_data=f"tier_{tier_key}"
+                )
+            ])
+        
+        keyboard.append([InlineKeyboardButton("❌ Cancel", callback_data="cancel_order")])
+        
+        reply_markup = InlineKeyboardMarkup(keyboard)
+        
+        text = """
+*📊 Choose Your Service Package*
+
+Please select one of our service tiers:
+
+*Basic Package* - 2,500 ETB/month
+*Professional Package* - 5,000 ETB/month  
+*Enterprise Package* - 10,000 ETB/month
+
+Click on your preferred package to continue.
+        """
+        
+        await message.reply_text(text, parse_mode='Markdown', reply_markup=reply_markup)
+        return SELECTING_TIER
+    
+    async def select_tier(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
+        """Handle tier selection."""
+        query = update.callback_query
+        await query.answer()
+        
+        tier_key = query.data.replace('tier_', '')
+        context.user_data['selected_tier'] = tier_key
+        context.user_data['selected_addons'] = []
+        
+        tier = Config.SERVICE_TIERS[tier_key]
+        
+        # Show add-on options
+        keyboard = []
+        for addon_key, addon in Config.ADDON_SERVICES.items():
+            keyboard.append([
+                InlineKeyboardButton(
+                    f"{addon['name']} (+{addon['price']} ETB)", 
+                    callback_data=f"addon_{addon_key}"
+                )
+            ])
+        
+        keyboard.append([InlineKeyboardButton("✅ Proceed to Contact Info", callback_data="proceed_contact")])
+        keyboard.append([InlineKeyboardButton("🔙 Back to Packages", callback_data="back_to_tiers")])
+        
+        reply_markup = InlineKeyboardMarkup(keyboard)
+        
+        text = f"""
+*{tier['name']} Selected* - {tier['price']} ETB/month
+
+*Package Features:*
+{chr(10).join(tier['features'])}
+
+*💎 Optional Add-on Services:*
+You can enhance your package with these additional services:
+        """
+        
+        await query.edit_message_text(text, parse_mode='Markdown', reply_markup=reply_markup)
+        return SELECTING_ADDONS
+    
+    async def select_addons(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
+        """Handle add-on selection."""
+        query = update.callback_query
+        await query.answer()
+        
+        if query.data.startswith('proceed_'):
+            return await self.enter_contact_info(update, context)
+        elif query.data == 'back_to_tiers':
+            return await self.start_order(update, context)
+        
+        addon_key = query.data.replace('addon_', '')
+        selected_addons = context.user_data.get('selected_addons', [])
+        
+        if addon_key in selected_addons:
+            selected_addons.remove(addon_key)
+        else:
+            selected_addons.append(addon_key)
+        
+        context.user_data['selected_addons'] = selected_addons
+        
+        # Update the message with current selection
+        tier_key = context.user_data['selected_tier']
+        tier = Config.SERVICE_TIERS[tier_key]
+        
+        total_price = tier['price']
+        addons_text = []
+        
+        for addon_key in selected_addons:
+            addon = Config.ADDON_SERVICES[addon_key]
+            total_price += addon['price']
+            addons_text.append(f"✅ {addon['name']} (+{addon['price']} ETB)")
+        
+        keyboard = []
+        for addon_key, addon in Config.ADDON_SERVICES.items():
+            status = "✅" if addon_key in selected_addons else "◻️"
+            keyboard.append([
+                InlineKeyboardButton(
+                    f"{status} {addon['name']} (+{addon['price']} ETB)", 
+                    callback_data=f"addon_{addon_key}"
+                )
+            ])
+        
+        keyboard.append([InlineKeyboardButton("✅ Proceed to Contact Info", callback_data="proceed_contact")])
+        keyboard.append([InlineKeyboardButton("🔙 Back to Packages", callback_data="back_to_tiers")])
+        
+        reply_markup = InlineKeyboardMarkup(keyboard)
+        
+        text = f"""
+*{tier['name']} Selected* - {tier['price']} ETB/month
+
+*Selected Add-ons:*
+{chr(10).join(addons_text) if addons_text else 'No add-ons selected'}
+
+*💰 Total Monthly Price: {total_price} ETB*
+
+*Optional Add-on Services:*
+        """
+        
+        await query.edit_message_text(text, parse_mode='Markdown', reply_markup=reply_markup)
+        return SELECTING_ADDONS
+    
+    async def enter_contact_info(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
+        """Prompt for contact information."""
+        query = update.callback_query
+        if query:
+            await query.answer()
+            message = query.message
+        else:
+            message = update.message
+        
+        # Create contact sharing button
+        contact_keyboard = [[KeyboardButton("📱 Share Phone Number", request_contact=True)]]
+        reply_markup = ReplyKeyboardMarkup(contact_keyboard, one_time_keyboard=True, resize_keyboard=True)
+        
+        text = """
+*📞 Contact Information*
+
+Please share your phone number using the button below, or type it manually.
+
+Format: +251 XXX XXX XXX or 09XXXXXXXX
+        """
+        
+        await message.reply_text(text, parse_mode='Markdown', reply_markup=reply_markup)
+        return ENTERING_CONTACT
+    
+    async def enter_contact(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
+        """Save contact information."""
+        if update.message.contact:
+            phone = update.message.contact.phone_number
+        else:
+            phone = update.message.text
+        
+        context.user_data['phone'] = phone
+        
+        # Remove the contact keyboard
+        remove_keyboard = ReplyKeyboardMarkup([[KeyboardButton("Remove")]], resize_keyboard=True, one_time_keyboard=True)
+        await update.message.reply_text(
+            "✅ Phone number saved!\n\nNow, please tell us your business name:",
+            reply_markup=remove_keyboard
+        )
+        
+        return ENTERING_BUSINESS
+    
+    async def enter_business(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
+        """Save business information."""
+        business_name = update.message.text
+        context.user_data['business_name'] = business_name
+        
+        text = """
+*💼 Special Requests*
+
+Do you have any specific requirements or special requests for your social media management?
+
+Examples:
+- Target audience details
+- Preferred content style
+- Specific platforms focus
+- Campaign goals
+
+Type your requests or type 'None' if you don't have any special requirements.
+        """
+        
+        await update.message.reply_text(text, parse_mode='Markdown')
+        return SPECIAL_REQUESTS
+    
+    async def special_requests(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
+        """Save special requests and show order summary."""
+        special_requests = update.message.text
+        context.user_data['special_requests'] = special_requests
+        
+        # Calculate total price
+        tier_key = context.user_data['selected_tier']
+        tier = Config.SERVICE_TIERS[tier_key]
+        total_price = tier['price']
+        
+        selected_addons = context.user_data.get('selected_addons', [])
+        addons_text = []
+        
+        for addon_key in selected_addons:
+            addon = Config.ADDON_SERVICES[addon_key]
+            total_price += addon['price']
+            addons_text.append(f"• {addon['name']} (+{addon['price']} ETB)")
+        
+        # Create order summary
+        text = f"""
+*📋 Order Summary*
+
+*Service Package:*
+{tier['name']} - {tier['price']} ETB/month
+
+*Add-on Services:*
+{chr(10).join(addons_text) if addons_text else 'None'}
+
+*Business Name:*
+{context.user_data['business_name']}
+
+*Special Requests:*
+{special_requests}
+
+*💰 Total Monthly Price: {total_price} ETB*
+
+Please review your order and confirm below.
+        """
+        
+        context.user_data['total_price'] = total_price
+        
+        keyboard = [
+            [InlineKeyboardButton("✅ Confirm Order", callback_data="confirm_order")],
+            [InlineKeyboardButton("🔙 Edit Order", callback_data="edit_order")],
+            [InlineKeyboardButton("❌ Cancel", callback_data="cancel_order")]
         ]
-    },
-    'enterprise': {
-        'name': '🚀 Enterprise Package',
-        'price': 10000,
-        'features': [
-            '✅ All Social Media Platforms',
-            '✅ 15+ Posts per week',
-            '✅ Competitor Analysis',
-            '✅ Custom Strategy',
-            '✅ Full Ad Campaigns',
-            '✅ Weekly Reports',
-            '✅ Dedicated Account Manager',
-            '✅ 24/7 Premium Support'
-        ]
-    }
-}
+        reply_markup = InlineKeyboardMarkup(keyboard)
+        
+        await update.message.reply_text(text, parse_mode='Markdown', reply_markup=reply_markup)
+        return CONFIRM_ORDER
+    
+    async def confirm_order(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
+        """Finalize the order."""
+        query = update.callback_query
+        await query.answer()
+        
+        if query.data == 'cancel_order':
+            await query.edit_message_text("❌ Order cancelled. Use /order to start a new order when you're ready.")
+            return ConversationHandler.END
+        
+        user = query.from_user
+        
+        # Save order to database
+        order_data = {
+            'user_id': user.id,
+            'username': user.username,
+            'first_name': user.first_name,
+            'last_name': user.last_name,
+            'phone': context.user_data['phone'],
+            'business_name': context.user_data['business_name'],
+            'selected_tier': context.user_data['selected_tier'],
+            'selected_addons': context.user_data.get('selected_addons', []),
+            'total_price': context.user_data['total_price'],
+            'special_requests': context.user_data['special_requests']
+        }
+        
+        order_id = db.create_order(order_data)
+        
+        # Send confirmation to user
+        user_text = f"""
+*✅ Order Confirmed!*
 
-ADDON_SERVICES = {
-    'video': {'name': '🎥 Video Content', 'price': 1000},
-    'analytics': {'name': '📊 Advanced Analytics', 'price': 500},
-    'seo': {'name': '🔍 SEO Optimization', 'price': 750},
-    'emergency': {'name': '🚨 Emergency Support', 'price': 1500}
-}
+Thank you for your order! Here are your order details:
 
-# User session data
-user_sessions = {}
+*Order ID:* #{order_id}
+*Service:* {Config.SERVICE_TIERS[order_data['selected_tier']]['name']}
+*Total Price:* {order_data['total_price']} ETB/month
 
-async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Send welcome message and main menu"""
-    user = update.effective_user
-    welcome_text = WELCOME_MESSAGE.format(name=user.first_name)
-    
-    await update.message.reply_text(
-        welcome_text,
-        reply_markup=main_menu_keyboard(),
-        parse_mode='HTML'
-    )
+*Next Steps:*
+1. Our team will contact you within 24 hours
+2. We'll discuss your requirements in detail
+3. Service setup and onboarding
 
-async def show_services(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Show service packages"""
-    query = update.callback_query
-    await query.answer()
-    
-    await query.edit_message_text(
-        SERVICES_MESSAGE,
-        reply_markup=services_keyboard(SERVICE_TIERS),
-        parse_mode='HTML'
-    )
+*Contact Support:* Use this bot or visit our channel: {Config.TELEGRAM_CHANNEL}
+        """
+        
+        await query.edit_message_text(user_text, parse_mode='Markdown')
+        
+        # Send notification to admin (you)
+        admin_text = f"""
+*🆕 NEW ORDER RECEIVED!*
 
-async def show_package_details(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Show details of selected package"""
-    query = update.callback_query
-    await query.answer()
-    
-    package_key = query.data.split('_')[1]
-    package = SERVICE_TIERS[package_key]
-    
-    # Store selected package in user session
-    user_id = query.from_user.id
-    if user_id not in user_sessions:
-        user_sessions[user_id] = {}
-    user_sessions[user_id]['package'] = package_key
-    
-    details_text = PACKAGE_DETAILS.format(
-        name=package['name'],
-        price=package['price'],
-        features='\n'.join(package['features'])
-    )
-    
-    await query.edit_message_text(
-        details_text,
-        reply_markup=package_details_keyboard(package_key),
-        parse_mode='HTML'
-    )
+*Order ID:* #{order_id}
+*Customer:* {user.first_name} {user.last_name or ''} (@{user.username or 'N/A'})
+*Business:* {order_data['business_name']}
+*Phone:* {order_data['phone']}
+*Package:* {Config.SERVICE_TIERS[order_data['selected_tier']]['name']}
+*Total:* {order_data['total_price']} ETB/month
+*Add-ons:* {', '.join(order_data['selected_addons']) or 'None'}
 
-async def show_addons(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Show addon services"""
-    query = update.callback_query
-    await query.answer()
+*Special Requests:*
+{order_data['special_requests']}
+        """
+        
+        # In a real scenario, you'd send this to your admin chat
+        # await context.bot.send_message(chat_id=ADMIN_CHAT_ID, text=admin_text, parse_mode='Markdown')
+        
+        print(f"NEW ORDER: {admin_text}")  # For now, print to console
+        
+        return ConversationHandler.END
     
-    package_key = query.data.split('_')[1]
+    async def cancel_order(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
+        """Cancel the order process."""
+        await update.message.reply_text(
+            "Order process cancelled. Use /order to start again when you're ready!"
+        )
+        return ConversationHandler.END
     
-    await query.edit_message_text(
-        ADDONS_MESSAGE,
-        reply_markup=addons_keyboard(ADDON_SERVICES, package_key),
-        parse_mode='HTML'
-    )
+    async def button_click(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
+        """Handle button clicks."""
+        query = update.callback_query
+        await query.answer()
+        
+        if query.data == 'view_services':
+            await self.show_services(query)
+        elif query.data == 'contact_support':
+            await query.edit_message_text(
+                f"📞 *Contact Support*\n\nFor support, please message us directly or visit our channel: {Config.TELEGRAM_CHANNEL}",
+                parse_mode='Markdown'
+            )
+        elif query.data == 'start_order':
+            await self.start_order(update, context)
+    
+    async def show_services(self, query):
+        """Show all available services."""
+        text = """
+*📊 Our Service Packages*
 
-async def toggle_addon(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Toggle addon selection"""
-    query = update.callback_query
-    await query.answer()
-    
-    data_parts = query.data.split('_')
-    package_key = data_parts[2]
-    addon_key = data_parts[3]
-    
-    user_id = query.from_user.id
-    if user_id not in user_sessions:
-        user_sessions[user_id] = {'addons': set()}
-    if 'addons' not in user_sessions[user_id]:
-        user_sessions[user_id]['addons'] = set()
-    
-    # Toggle addon
-    if addon_key in user_sessions[user_id]['addons']:
-        user_sessions[user_id]['addons'].remove(addon_key)
-    else:
-        user_sessions[user_id]['addons'].add(addon_key)
-    
-    # Update message with current selection
-    selected_addons = [ADDON_SERVICES[key]['name'] for key in user_sessions[user_id]['addons']]
-    selection_text = "Selected: " + ", ".join(selected_addons) if selected_addons else "No addons selected"
-    
-    message_text = ADDONS_MESSAGE + f"\n\n{selection_text}"
-    
-    await query.edit_message_text(
-        message_text,
-        reply_markup=addons_keyboard(ADDON_SERVICES, package_key),
-        parse_mode='HTML'
-    )
+*Basic Package - 2,500 ETB/month*
+• 2 Social Media Platforms
+• 5 Posts per week
+• Basic Analytics
+• Content Creation
+• 24/7 Support
 
-async def calculate_price(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Calculate and show total price"""
-    query = update.callback_query
-    await query.answer()
-    
-    data_parts = query.data.split('_')
-    package_key = data_parts[2]
-    
-    user_id = query.from_user.id
-    package = SERVICE_TIERS[package_key]
-    base_price = package['price']
-    
-    # Calculate addons price
-    addons_price = 0
-    selected_addons = user_sessions.get(user_id, {}).get('addons', set())
-    
-    for addon_key in selected_addons:
-        addons_price += ADDON_SERVICES[addon_key]['price']
-    
-    total_price = base_price + addons_price
-    
-    # Store in session
-    if user_id not in user_sessions:
-        user_sessions[user_id] = {}
-    user_sessions[user_id]['package'] = package_key
-    user_sessions[user_id]['total_price'] = total_price
-    
-    price_text = PRICE_CALCULATION.format(
-        package_name=package['name'],
-        base_price=base_price,
-        addons_price=addons_price,
-        total_price=total_price,
-        selected_addons=", ".join([ADDON_SERVICES[key]['name'] for key in selected_addons]) if selected_addons else "None"
-    )
-    
-    await query.edit_message_text(
-        price_text,
-        reply_markup=order_confirmation_keyboard(),
-        parse_mode='HTML'
-    )
+*Professional Package - 5,000 ETB/month*
+• 4 Social Media Platforms  
+• 10 Posts per week
+• Advanced Analytics
+• Content Strategy
+• Ad Management
+• Monthly Reports
+• Priority Support
 
-async def request_contact(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Request contact information"""
-    query = update.callback_query
-    await query.answer()
-    
-    await query.edit_message_text(
-        CONTACT_REQUEST,
-        reply_markup=contact_keyboard(),
-        parse_mode='HTML'
-    )
+*Enterprise Package - 10,000 ETB/month*
+• All Social Media Platforms
+• 15+ Posts per week
+• Competitor Analysis
+• Custom Strategy
+• Full Ad Campaigns
+• Weekly Reports
+• Dedicated Account Manager
+• 24/7 Premium Support
 
-async def handle_contact(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Handle contact information"""
-    user_id = update.effective_user.id
-    
-    if user_id not in user_sessions:
-        await update.message.reply_text("Please start over using /start")
-        return
-    
-    # Store contact info
-    user_sessions[user_id]['contact_info'] = update.message.text
-    user_sessions[user_id]['username'] = update.effective_user.username
-    user_sessions[user_id]['user_id'] = user_id
-    
-    # Confirm order
-    await update.message.reply_text(
-        ORDER_CONFIRMATION,
-        reply_markup=final_confirmation_keyboard(),
-        parse_mode='HTML'
-    )
+*💎 Add-on Services:*
+• Video Content Creation: +1,000 ETB
+• Advanced Analytics: +500 ETB  
+• SEO Optimization: +750 ETB
+• Emergency Support: +1,500 ETB
 
-async def confirm_order(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Final order confirmation"""
-    query = update.callback_query
-    await query.answer()
-    
-    user_id = query.from_user.id
-    session = user_sessions.get(user_id, {})
-    
-    if not session:
-        await query.edit_message_text("Session expired. Please start over with /start")
-        return
-    
-    # Save order to database
-    order_data = {
-        'user_id': user_id,
-        'username': session.get('username'),
-        'package': session.get('package'),
-        'addons': list(session.get('addons', [])),
-        'total_price': session.get('total_price', 0),
-        'contact_info': session.get('contact_info', ''),
-        'status': 'pending'
-    }
-    
-    order_id = save_order(order_data)
-    
-    # Send confirmation to user
-    await query.edit_message_text(
-        ORDER_COMPLETE.format(order_id=order_id),
-        parse_mode='HTML'
-    )
-    
-    # Send notification to admin
-    admin_message = NEW_ORDER_NOTIFICATION.format(
-        order_id=order_id,
-        username=session.get('username', 'N/A'),
-        user_id=user_id,
-        package=SERVICE_TIERS[session['package']]['name'],
-        total_price=session['total_price'],
-        contact_info=session.get('contact_info', 'N/A')
-    )
-    
-    await context.bot.send_message(
-        chat_id=ADMIN_CHAT_ID,
-        text=admin_message,
-        parse_mode='HTML'
-    )
-    
-    # Clear user session
-    if user_id in user_sessions:
-        del user_sessions[user_id]
-
-async def show_orders(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Admin command to show orders"""
-    user_id = update.effective_user.id
-    
-    if str(user_id) != ADMIN_CHAT_ID:
-        await update.message.reply_text("This command is for admin only.")
-        return
-    
-    orders = get_orders()
-    
-    if not orders:
-        await update.message.reply_text("No orders yet.")
-        return
-    
-    orders_text = "📋 <b>All Orders:</b>\n\n"
-    for order in orders:
-        orders_text += f"🆔 Order ID: {order[0]}\n"
-        orders_text += f"👤 User: @{order[2] or 'N/A'} (ID: {order[1]})\n"
-        orders_text += f"📦 Package: {order[3]}\n"
-        orders_text += f"💰 Total: {order[5]} ETB\n"
-        orders_text += f"📞 Contact: {order[6]}\n"
-        orders_text += f"📅 Date: {order[7]}\n"
-        orders_text += f"🔰 Status: {order[8]}\n"
-        orders_text += "─" * 30 + "\n"
-    
-    await update.message.reply_text(orders_text, parse_mode='HTML')
-
-async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Handle regular messages"""
-    await update.message.reply_text(
-        "Please use the menu buttons or type /start to begin."
-    )
+*Start your order with* /order
+        """
+        
+        keyboard = [[InlineKeyboardButton("🛒 Start Order", callback_data="start_order")]]
+        reply_markup = InlineKeyboardMarkup(keyboard)
+        
+        await query.edit_message_text(text, parse_mode='Markdown', reply_markup=reply_markup)
 
 def main():
-    """Start the bot"""
-    application = Application.builder().token(BOT_TOKEN).build()
+    """Start the bot."""
+    # Create bot instance
+    bot_token = os.getenv('BOT_TOKEN', Config.BOT_TOKEN)
     
-    # Handlers
-    application.add_handler(CommandHandler("start", start))
-    application.add_handler(CommandHandler("orders", show_orders))
+    if not bot_token or bot_token == 'YOUR_BOT_TOKEN_HERE':
+        print("❌ Please set your BOT_TOKEN environment variable!")
+        return
     
-    application.add_handler(CallbackQueryHandler(show_services, pattern="^services$"))
-    application.add_handler(CallbackQueryHandler(show_package_details, pattern="^package_"))
-    application.add_handler(CallbackQueryHandler(show_addons, pattern="^addons_"))
-    application.add_handler(CallbackQueryHandler(toggle_addon, pattern="^toggle_"))
-    application.add_handler(CallbackQueryHandler(calculate_price, pattern="^calculate_"))
-    application.add_handler(CallbackQueryHandler(request_contact, pattern="^order_confirm$"))
-    application.add_handler(CallbackQueryHandler(confirm_order, pattern="^final_confirm$"))
-    
-    application.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_contact))
+    bot = SocialMediaBot(bot_token)
     
     # Start the Bot
-    application.run_polling()
+    print("🤖 Bot is starting...")
+    bot.application.run_polling()
 
 if __name__ == '__main__':
     main()
