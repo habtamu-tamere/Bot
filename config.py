@@ -1,6 +1,6 @@
 # Bot Configuration
 BOT_TOKEN = "YOUR_BOT_TOKEN_HERE"  # Get from @BotFather
-CHANNEL_USERNAME = "your_channel_username"  # Without @
+CHANNEL_USERNAME = "@campaigneth"  # Without @
 
 # Service Tiers in Ethiopian Birr
 SERVICE_TIERS = {
